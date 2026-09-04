@@ -21,7 +21,6 @@ public struct InjectCommand: AsyncParsableCommand {
 
         let config = try VMConfig.load(name: name)
 
-        // Asynchronously hop to Thread #1 (the Main Actor) to run AppKit
         await MainActor.run {
             let app = NSApplication.shared
             app.setActivationPolicy(.regular)
@@ -55,47 +54,56 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             print("2. Create an admin user account (e.g., admin / admin).")
             print("3. Enable Remote Login: System Settings -> General -> Sharing -> Remote Login (SSH).")
             print("4. When finished, shut down the VM via Apple Menu -> Shut Down.")
+            fflush(stdout)
 
             let vmConfig = try buildVMConfiguration()
             let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
             self.virtualMachine = vm
             vm.delegate = self
 
-            // Setup Host GUI Window
-            let windowRect = NSRect(x: 100, y: 100, width: 1280, height: 800)
+            // 1. Configure the Virtual Machine View
+            let vmView = VZVirtualMachineView()
+            vmView.virtualMachine = vm
+            vmView.capturesSystemKeys = true
+            vmView.automaticallyReconfiguresDisplay = true
+
+            // 2. Setup Host Window sized appropriately for 1512x982 display
+            let windowSize = NSSize(width: 1200, height: 750)
             let window = NSWindow(
-                contentRect: windowRect,
+                contentRect: NSRect(origin: .zero, size: windowSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "MacBuilder Setup: \(config.name)"
+            
+            // Set vmView directly as root contentView to enable Metal layer compositing
+            window.contentView = vmView
             window.center()
             window.delegate = self
-
-            // Embed Virtualization Display View
-            let vmView = VZVirtualMachineView(frame: window.contentView!.bounds)
-            vmView.autoresizingMask = [.width, .height]
-            vmView.virtualMachine = vm
-            vmView.capturesSystemKeys = true
-
-            window.contentView?.addSubview(vmView)
             self.window = window
 
             window.makeKeyAndOrderFront(nil)
             NSApp.activate()
 
+            print("Starting hypervisor...")
+            fflush(stdout)
+
             vm.start { [weak self] result in
                 switch result {
                 case .success:
-                    print("Hypervisor running. GUI window ready.")
+                    print("Hypervisor running. macOS guest kernel is booting...")
+                    print("Note: First boot takes 25-45 seconds to initialize WindowServer and show Setup Assistant.")
+                    fflush(stdout)
                 case .failure(let error):
                     print("Failed to start VM: \(error.localizedDescription)")
+                    fflush(stdout)
                     self?.terminateApp()
                 }
             }
         } catch {
             print("Configuration Error: \(error.localizedDescription)")
+            fflush(stdout)
             terminateApp()
         }
     }
@@ -133,11 +141,22 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
+        // Dynamically match the host MacBook's Liquid Retina display characteristics
         let graphics = VZMacGraphicsDeviceConfiguration()
-        graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)]
+        if let screen = NSScreen.main {
+            let display = VZMacGraphicsDisplayConfiguration(
+                for: screen,
+                sizeInPoints: NSSize(width: 1200, height: 750)
+            )
+            graphics.displays = [display]
+        } else {
+            graphics.displays = [
+                VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)
+            ]
+        }
         vmConfig.graphicsDevices = [graphics]
 
-        // Input Devices for Setup Assistant Interaction
+        // Input Devices
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vmConfig.pointingDevices = [
             VZUSBScreenCoordinatePointingDeviceConfiguration(),
@@ -151,7 +170,8 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // MARK: - Lifecycle Management
 
     func windowWillClose(_ notification: Notification) {
-        print("Window closed by user. Requesting guest shutdown...")
+        print("\nWindow closed by user. Requesting guest shutdown...")
+        fflush(stdout)
         if let vm = virtualMachine, vm.canRequestStop {
             try? vm.requestStop()
         }
@@ -160,14 +180,16 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         Task { @MainActor in
-            print("Guest OS shutdown detected. Closing GUI session.")
+            print("\nGuest OS shutdown detected. Closing GUI session.")
+            fflush(stdout)
             self.terminateApp()
         }
     }
 
     nonisolated func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
         Task { @MainActor in
-            print("Virtual Machine stopped with error: \(error.localizedDescription)")
+            print("\nVirtual Machine stopped with error: \(error.localizedDescription)")
+            fflush(stdout)
             self.terminateApp()
         }
     }
