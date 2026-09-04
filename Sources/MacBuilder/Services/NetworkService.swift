@@ -5,6 +5,7 @@ import Darwin
 public final class NetworkService: Sendable {
     public init() {}
 
+    /// Resolves the guest IP address assigned to a specific MAC address via Apple NAT DHCP or ARP cache.
     public func resolveGuestIP(macAddress: String, timeout: TimeInterval = 60.0) async throws -> String {
         let normalizedTargetMAC = normalizeMAC(macAddress)
         let deadline = Date().addingTimeInterval(timeout)
@@ -22,6 +23,7 @@ public final class NetworkService: Sendable {
         throw VMError.networkTimeout
     }
 
+    /// Polls a TCP port (default 22 for SSH) until the guest accepts socket connections.
     public func waitForPort(host: String, port: Int32 = 22, timeout: TimeInterval = 90.0) async throws {
         let deadline = Date().addingTimeInterval(timeout)
 
@@ -36,15 +38,27 @@ public final class NetworkService: Sendable {
         throw VMError.networkTimeout
     }
 
+    // MARK: - Format Normalization
+
     private func normalizeMAC(_ mac: String) -> String {
-        mac.lowercased()
-            .replacingOccurrences(of: "-", with: ":")
-            .split(separator: ":")
-            .map { part in
-                part.count == 1 ? "0\(part)" : String(part)
+        let cleaned = mac.lowercased().replacingOccurrences(of: "-", with: ":")
+        let components = cleaned.components(separatedBy: ":")
+        var paddedParts: [String] = []
+
+        for component in components {
+            let trimmed = component.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                if trimmed.count == 1 {
+                    paddedParts.append("0" + trimmed)
+                } else {
+                    paddedParts.append(trimmed)
+                }
             }
-            .joined(separator: ":")
+        }
+        return paddedParts.joined(separator: ":")
     }
+
+    // MARK: - DHCP & ARP Parsers
 
     private func parseDHCPLeases(targetMAC: String) -> String? {
         let leasePath = "/var/db/dhcpd_leases"
@@ -52,22 +66,31 @@ public final class NetworkService: Sendable {
             return nil
         }
 
-        let entries = content.components(separatedBy: "}")
-        for entry in entries {
-            guard let hwIndex = entry.range(of: "hw_address=")?.upperBound,
-                  let ipIndex = entry.range(of: "ip_address=")?.upperBound else {
+        let ipPattern = #"ip_address=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"#
+        let hwPattern = #"hw_address=(?:[0-9]+,)?([0-9a-fA-F:]+)"#
+
+        guard let ipRegex = try? NSRegularExpression(pattern: ipPattern),
+              let hwRegex = try? NSRegularExpression(pattern: hwPattern) else {
+            return nil
+        }
+
+        let blocks = content.components(separatedBy: "}")
+        for block in blocks {
+            let nsBlock = block as NSString
+            let blockRange = NSRange(location: 0, length: nsBlock.length)
+
+            guard let ipMatch = ipRegex.firstMatch(in: block, options: [], range: blockRange),
+                  let hwMatch = hwRegex.firstMatch(in: block, options: [], range: blockRange) else {
                 continue
             }
 
-            let hwPart = entry[hwIndex...].split(whereSeparator: \.isNewline).first ?? ""
-            let ipPart = entry[ipIndex...].split(whereSeparator: \.isNewline).first ?? ""
+            if ipMatch.numberOfRanges >= 2 && hwMatch.numberOfRanges >= 2 {
+                let foundIP: String = nsBlock.substring(with: ipMatch.range(at: 1))
+                let foundHW: String = nsBlock.substring(with: hwMatch.range(at: 1))
 
-            let rawHW = hwPart.components(separatedBy: ",").last ?? String(hwPart)
-            let normalizedHW = normalizeMAC(rawHW.trimmingCharacters(in: .whitespacesAndNewlines))
-            let ip = String(ipPart).trimmingCharacters(in: .whitespacesAndNewlines)
-
-            if normalizedHW == targetMAC && !ip.isEmpty {
-                return ip
+                if normalizeMAC(foundHW) == targetMAC {
+                    return foundIP
+                }
             }
         }
         return nil
@@ -88,13 +111,23 @@ public final class NetworkService: Sendable {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let output = String(data: data, encoding: .utf8) else { return nil }
 
+            // Matches ARP lines formatted as: ? (192.168.64.4) at 5a:94:ef:12:34:56 on bridge100 ...
+            let arpPattern = #"\(([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\)\s+at\s+([0-9a-fA-F:]+)"#
+            guard let regex = try? NSRegularExpression(pattern: arpPattern) else { return nil }
+
             for line in output.components(separatedBy: .newlines) {
-                let parts = line.split(whereSeparator: \.isWhitespace).map(String.init)
-                guard parts.count >= 4 else { continue }
-                let ipRaw = parts 1 .trimmingCharacters(in: CharacterSet(charactersIn: "()"))
-                let macRaw = parts 3 
-                if normalizeMAC(macRaw) == targetMAC {
-                    return ipRaw
+                let nsLine = line as NSString
+                let fullRange = NSRange(location: 0, length: nsLine.length)
+
+                if let match = regex.firstMatch(in: line, options: [], range: fullRange) {
+                    if match.numberOfRanges >= 3 {
+                        let ipFound: String = nsLine.substring(with: match.range(at: 1))
+                        let macFound: String = nsLine.substring(with: match.range(at: 2))
+
+                        if normalizeMAC(macFound) == targetMAC {
+                            return ipFound
+                        }
+                    }
                 }
             }
         } catch {
@@ -102,6 +135,8 @@ public final class NetworkService: Sendable {
         }
         return nil
     }
+
+    // MARK: - POSIX Socket Probe
 
     private func isPortOpen(host: String, port: Int32) -> Bool {
         var hints = addrinfo()
