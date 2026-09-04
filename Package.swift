@@ -2,19 +2,19 @@
 import PackageDescription
 
 let package = Package(
-    name: "MacBuilder",
+    name: "macbuilder",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "macbuilder", targets: ["MacBuilder"])
+        .executable(name: "macbuilder", targets: ["macbuilder"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.4.0")
     ],
     targets: [
         .executableTarget(
-            name: "MacBuilder",
+            name: "macbuilder",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],

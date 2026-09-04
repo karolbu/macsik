@@ -14,19 +14,23 @@ public struct InjectCommand: ParsableCommand {
 
     public init() {}
 
-    @MainActor
-    public func run() throws {
+    public mutating func run() throws {
         guard VZVirtualMachine.isSupported else {
             throw VMError.unsupportedHardware
         }
 
         let config = try VMConfig.load(name: name)
-        let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
 
-        let delegate = InjectAppDelegate(config: config)
-        app.delegate = delegate
-        app.run()
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.regular)
+
+            let delegate = InjectAppDelegate(config: config)
+            app.delegate = delegate
+            withExtendedLifetime(delegate) {
+                app.run()
+            }
+        }
     }
 }
 
@@ -48,14 +52,13 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             print("=== Booting [\(config.name)] in GUI Mode ===")
             print("Complete the Setup Assistant, configure an admin account, and enable:")
             print("  System Settings -> General -> Sharing -> Remote Login (SSH)")
-            print("When finished, simply shut down the VM via Apple Menu -> Shut Down.")
+            print("When finished, shut down the VM via Apple Menu -> Shut Down.")
 
             let vmConfig = try buildVMConfiguration()
             let vm = VZVirtualMachine(configuration: vmConfig)
             self.virtualMachine = vm
             vm.delegate = self
 
-            // Setup AppKit Window and Native Virtual Machine View
             let windowRect = NSRect(x: 100, y: 100, width: 1280, height: 800)
             let window = NSWindow(
                 contentRect: windowRect,
@@ -96,7 +99,6 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private func buildVMConfiguration() throws -> VZVirtualMachineConfiguration {
         let vmConfig = VZVirtualMachineConfiguration()
 
-        // 1. Reload identical Hardware Model & Machine Identifier
         guard let hwModelData = try? Data(contentsOf: config.hardwareModelURL),
               let hardwareModel = VZMacHardwareModel(dataRepresentation: hwModelData) else {
             throw VMError.invalidHardwareModel
@@ -117,24 +119,24 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         vmConfig.cpuCount = min(config.cpuCount, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
         vmConfig.memorySize = min(config.memorySizeMB * 1024 * 1024, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
 
-        // 2. Storage
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: config.diskURL, readOnly: false)
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
-        // 3. Network with static MAC
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
         networkDevice.macAddress = VZMACAddress(string: config.macAddress)!
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // 4. GUI Display Device
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)]
         vmConfig.graphicsDevices = [graphics]
 
-        // 5. Input Devices (Crucial for interacting with Setup Assistant)
+        // Official pointing devices and keyboards
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
-        vmConfig.pointingDevices = [VZUSBMouseConfiguration()]
+        vmConfig.pointingDevices = [
+            VZUSBScreenCoordinatePointingDeviceConfiguration(),
+            VZMacTrackpadConfiguration()
+        ]
 
         try vmConfig.validate()
         return vmConfig
@@ -150,20 +152,23 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         terminateApp()
     }
 
-    func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-        print("Guest OS shutdown detected. Closing GUI session.")
-        terminateApp()
+    nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        Task { @MainActor in
+            print("Guest OS shutdown detected. Closing GUI session.")
+            self.terminateApp()
+        }
     }
 
-    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-        print("Virtual Machine stopped with error: \(error.localizedDescription)")
-        terminateApp()
+    nonisolated func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
+        Task { @MainActor in
+            print("Virtual machine stopped with error: \(error.localizedDescription)")
+            self.terminateApp()
+        }
     }
 
     private func terminateApp() {
         DispatchQueue.main.async {
             NSApp.stop(nil)
-            // Post an empty event to wake up the AppKit event loop immediately
             let dummyEvent = NSEvent.otherEvent(
                 with: .applicationDefined,
                 location: .zero,

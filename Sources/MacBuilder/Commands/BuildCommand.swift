@@ -46,7 +46,6 @@ public struct BuildCommand: AsyncParsableCommand {
             targetConfig = try VMConfig.load(name: name)
         }
 
-        // Ensure ephemeral cleanup on termination
         defer {
             if ephemeral {
                 print("Cleaning up ephemeral instance [\(runName)]...")
@@ -57,7 +56,6 @@ public struct BuildCommand: AsyncParsableCommand {
         print("=== Booting [\(runName)] in Headless Mode ===")
         let vm = try buildHeadlessVM(config: targetConfig)
 
-        // Boot headless virtual machine
         try await vm.start()
         print("Hypervisor running. Waiting for guest OS boot and DHCP lease...")
 
@@ -81,11 +79,9 @@ public struct BuildCommand: AsyncParsableCommand {
 
         print("----------------------------------------\nWorkload completed with exit code: \(exitCode)")
 
-        // Orderly VM Teardown
         print("Powering down VM...")
         if vm.canRequestStop {
             try? vm.requestStop()
-            // Wait up to 10 seconds for graceful ACPI powerdown
             for _ in 0..<10 {
                 if vm.state == .stopped { break }
                 try? await Task.sleep(for: .seconds(1))
@@ -132,10 +128,14 @@ public struct BuildCommand: AsyncParsableCommand {
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // Framework-level requirement: Must attach a display configuration even when headless
+        // Framework requirement: display is mandatory even in headless mode
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)]
         vmConfig.graphicsDevices = [graphics]
+
+        // Valid pointing and keyboard configurations
+        vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
+        vmConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
 
         try vmConfig.validate()
         return VZVirtualMachine(configuration: vmConfig)

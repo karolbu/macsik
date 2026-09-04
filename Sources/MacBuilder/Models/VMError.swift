@@ -11,6 +11,7 @@ public enum VMError: LocalizedError, Sendable {
     case networkTimeout
     case guestCommandFailed(exitCode: Int32)
     case unsupportedHardware
+    case fileNotFound(String)
 
     public var errorDescription: String? {
         switch self {
@@ -29,11 +30,13 @@ public enum VMError: LocalizedError, Sendable {
         case .bootFailed(let reason):
             return "Failed to boot virtual machine: \(reason)"
         case .networkTimeout:
-            return "Timed out waiting for guest IP address / SSH readiness."
+            return "Timed out waiting for guest IP lease or SSH service readiness."
         case .guestCommandFailed(let code):
-            return "Guest execution terminated with non-zero exit code: \(code)"
+            return "Guest execution failed with non-zero exit code: \(code)"
         case .unsupportedHardware:
-            return "Virtualization is only supported on Apple Silicon hardware."
+            return "Apple Virtualization framework is only supported on Apple Silicon Macs."
+        case .fileNotFound(let path):
+            return "Required file not found at path: \(path)"
         }
     }
 }

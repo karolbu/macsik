@@ -22,11 +22,10 @@ public struct VMConfig: Codable, Sendable {
         self.macAddress = macAddress
     }
 
-    // MARK: - Path Resolvers
-
     public static var baseStorageURL: URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".macbuilder/vms", isDirectory: true)
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".macbuilder", isDirectory: true)
+            .appendingPathComponent("vms", isDirectory: true)
     }
 
     public var vmDirectory: URL {
@@ -53,8 +52,6 @@ public struct VMConfig: Codable, Sendable {
         vmDirectory.appendingPathComponent("config.json")
     }
 
-    // MARK: - Persistence & APFS Clones
-
     public func save() throws {
         try FileManager.default.createDirectory(at: vmDirectory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
@@ -73,19 +70,19 @@ public struct VMConfig: Codable, Sendable {
         return try JSONDecoder().decode(VMConfig.self, from: data)
     }
 
-    /// Performs an instantaneous APFS Copy-on-Write clone of the entire VM directory.
+    /// Performs an instantaneous APFS Copy-on-Write clone of the VM bundle.
     public static func clone(from sourceName: String, to targetName: String) throws -> VMConfig {
         let sourceConfig = try load(name: sourceName)
         let targetDir = Self.baseStorageURL.appendingPathComponent(targetName, isDirectory: true)
+
+        try FileManager.default.createDirectory(at: Self.baseStorageURL, withIntermediateDirectories: true)
 
         if FileManager.default.fileExists(atPath: targetDir.path) {
             try FileManager.default.removeItem(at: targetDir)
         }
 
-        // On APFS, copyItem utilizes copyfile(COPYFILE_CLONE) natively.
         try FileManager.default.copyItem(at: sourceConfig.vmDirectory, to: targetDir)
 
-        // Generate a fresh MAC address for the clone so DHCP leases do not collide
         let newMac = VZMACAddress.randomLocallyAdministered().string
         let newConfig = VMConfig(
             name: targetName,

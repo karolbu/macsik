@@ -3,7 +3,6 @@ import Foundation
 public final class SSHService: Sendable {
     public init() {}
 
-    /// Executes a command inside the guest via SSH, streaming standard output and error in real-time.
     public func execute(
         host: String,
         port: Int = 22,
@@ -29,7 +28,6 @@ public final class SSHService: Sendable {
         if let keyPath {
             arguments += ["-i", keyPath, "-o", "IdentitiesOnly=yes"]
         } else if let password {
-            // Provide non-interactive password handling via SSH_ASKPASS
             let tempDir = FileManager.default.temporaryDirectory
             let scriptURL = tempDir.appendingPathComponent("askpass-\(UUID().uuidString).sh")
             let scriptContent = "#!/bin/sh\nexec echo '\(password)'\n"
