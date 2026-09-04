@@ -2,6 +2,7 @@ import Foundation
 import ArgumentParser
 import Virtualization
 
+@MainActor
 public struct BuildCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "build",
@@ -128,16 +129,14 @@ public struct BuildCommand: AsyncParsableCommand {
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // Framework requirement: display is mandatory even in headless mode
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)]
         vmConfig.graphicsDevices = [graphics]
 
-        // Valid pointing and keyboard configurations
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vmConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
 
         try vmConfig.validate()
-        return VZVirtualMachine(configuration: vmConfig)
+        return VZVirtualMachine(configuration: vmConfig, queue: .main)
     }
 }

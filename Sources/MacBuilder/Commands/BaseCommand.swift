@@ -2,7 +2,8 @@ import Foundation
 import ArgumentParser
 import Virtualization
 
-public struct BaseCommand: AsyncParsableCommand, Sendable {
+@MainActor
+public struct BaseCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "base",
         abstract: "Installs macOS from an IPSW restore image into a managed base VM."
@@ -32,7 +33,6 @@ public struct BaseCommand: AsyncParsableCommand, Sendable {
 
         let vmDir = VMConfig.baseStorageURL.appendingPathComponent(name, isDirectory: true)
 
-        // Automatically clean up partial dirty directories from previous interrupted runs
         if FileManager.default.fileExists(atPath: vmDir.path) {
             print("Found existing/incomplete VM directory for '\(name)'. Cleaning up for fresh installation...")
             try FileManager.default.removeItem(at: vmDir)
@@ -99,7 +99,7 @@ public struct BaseCommand: AsyncParsableCommand, Sendable {
         try diskHandle.truncate(atOffset: diskSizeBytes)
         try diskHandle.close()
 
-        // 3. Initialize NVRAM Auxiliary Storage and keep instance
+        // 3. Initialize NVRAM Auxiliary Storage
         print("[2/6] Initializing NVRAM auxiliary storage...")
         let auxiliaryStorage = try VZMacAuxiliaryStorage(
             creatingStorageAt: config.auxiliaryStorageURL,
@@ -125,7 +125,6 @@ public struct BaseCommand: AsyncParsableCommand, Sendable {
 
         vmConfig.bootLoader = VZMacOSBootLoader()
 
-        // Ensure allocated resources meet Apple's minimum requirements for this image
         let effectiveCPU = max(config.cpuCount, supportedConfig.minimumSupportedCPUCount)
         let effectiveRAM = max(config.memorySizeMB * 1024 * 1024, supportedConfig.minimumSupportedMemorySize)
         vmConfig.cpuCount = min(effectiveCPU, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
@@ -137,10 +136,10 @@ public struct BaseCommand: AsyncParsableCommand, Sendable {
         print("[5/6] Validating configuration...")
         try vmConfig.validate()
 
-        // 6. Initialize Hypervisor and Installer
+        // 6. Initialize Hypervisor and Installer explicitly on the Main Queue
         print("[6/6] Initializing macOS installer...")
-        let vm = VZVirtualMachine(configuration: vmConfig)
-        let installer = VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: localRestoreImageURL)
+        let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
+        let installer = VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: restoreImage.url)
 
         print("Starting installation into \(name)...")
         let observation = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
