@@ -3,7 +3,7 @@ import ArgumentParser
 import Virtualization
 import AppKit
 
-public struct InjectCommand: ParsableCommand {
+public struct InjectCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "inject",
         abstract: "Launches the VM in GUI mode for interactive Setup Assistant completion."
@@ -14,14 +14,15 @@ public struct InjectCommand: ParsableCommand {
 
     public init() {}
 
-    public mutating func run() throws {
+    public func run() async throws {
         guard VZVirtualMachine.isSupported else {
             throw VMError.unsupportedHardware
         }
 
         let config = try VMConfig.load(name: name)
 
-        MainActor.assumeIsolated {
+        // Asynchronously hop to Thread #1 (the Main Actor) to run AppKit
+        await MainActor.run {
             let app = NSApplication.shared
             app.setActivationPolicy(.regular)
 
@@ -34,7 +35,7 @@ public struct InjectCommand: ParsableCommand {
     }
 }
 
-// MARK: - AppKit Host Application Delegate
+// MARK: - AppKit GUI Host Application Delegate
 
 @MainActor
 final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate {
@@ -50,15 +51,17 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             print("=== Booting [\(config.name)] in GUI Mode ===")
-            print("Complete the Setup Assistant, configure an admin account, and enable:")
-            print("  System Settings -> General -> Sharing -> Remote Login (SSH)")
-            print("When finished, shut down the VM via Apple Menu -> Shut Down.")
+            print("1. Complete macOS Setup Assistant.")
+            print("2. Create an admin user account (e.g., admin / admin).")
+            print("3. Enable Remote Login: System Settings -> General -> Sharing -> Remote Login (SSH).")
+            print("4. When finished, shut down the VM via Apple Menu -> Shut Down.")
 
             let vmConfig = try buildVMConfiguration()
-            let vm = VZVirtualMachine(configuration: vmConfig)
+            let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
             self.virtualMachine = vm
             vm.delegate = self
 
+            // Setup Host GUI Window
             let windowRect = NSRect(x: 100, y: 100, width: 1280, height: 800)
             let window = NSWindow(
                 contentRect: windowRect,
@@ -66,10 +69,11 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 backing: .buffered,
                 defer: false
             )
-            window.title = "MacBuilder Onboarding: \(config.name)"
+            window.title = "MacBuilder Setup: \(config.name)"
             window.center()
             window.delegate = self
 
+            // Embed Virtualization Display View
             let vmView = VZVirtualMachineView(frame: window.contentView!.bounds)
             vmView.autoresizingMask = [.width, .height]
             vmView.virtualMachine = vm
@@ -79,15 +83,15 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             self.window = window
 
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
 
-            vm.start { result in
+            vm.start { [weak self] result in
                 switch result {
                 case .success:
-                    print("VM started successfully. GUI window ready.")
+                    print("Hypervisor running. GUI window ready.")
                 case .failure(let error):
                     print("Failed to start VM: \(error.localizedDescription)")
-                    self.terminateApp()
+                    self?.terminateApp()
                 }
             }
         } catch {
@@ -123,7 +127,9 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        networkDevice.macAddress = VZMACAddress(string: config.macAddress)!
+        if let mac = VZMACAddress(string: config.macAddress) {
+            networkDevice.macAddress = mac
+        }
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
@@ -131,7 +137,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)]
         vmConfig.graphicsDevices = [graphics]
 
-        // Official pointing devices and keyboards
+        // Input Devices for Setup Assistant Interaction
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vmConfig.pointingDevices = [
             VZUSBScreenCoordinatePointingDeviceConfiguration(),
@@ -142,10 +148,10 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         return vmConfig
     }
 
-    // MARK: - Window & VM Lifecycle Management
+    // MARK: - Lifecycle Management
 
     func windowWillClose(_ notification: Notification) {
-        print("Window closed by user. Requesting VM shutdown...")
+        print("Window closed by user. Requesting guest shutdown...")
         if let vm = virtualMachine, vm.canRequestStop {
             try? vm.requestStop()
         }
@@ -161,28 +167,26 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     nonisolated func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
         Task { @MainActor in
-            print("Virtual machine stopped with error: \(error.localizedDescription)")
+            print("Virtual Machine stopped with error: \(error.localizedDescription)")
             self.terminateApp()
         }
     }
 
-    private func terminateApp() {
-        DispatchQueue.main.async {
-            NSApp.stop(nil)
-            let dummyEvent = NSEvent.otherEvent(
-                with: .applicationDefined,
-                location: .zero,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: 0,
-                context: nil,
-                subtype: 0,
-                data1: 0,
-                data2: 0
-            )
-            if let dummyEvent {
-                NSApp.postEvent(dummyEvent, atStart: true)
-            }
+    func terminateApp() {
+        NSApp.stop(nil)
+        let dummyEvent = NSEvent.otherEvent(
+            with: .applicationDefined,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 0,
+            data1: 0,
+            data2: 0
+        )
+        if let dummyEvent {
+            NSApp.postEvent(dummyEvent, atStart: true)
         }
     }
 }
