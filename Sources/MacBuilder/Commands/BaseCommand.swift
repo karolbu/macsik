@@ -2,7 +2,6 @@ import Foundation
 import ArgumentParser
 import Virtualization
 
-@MainActor
 public struct BaseCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "base",
@@ -27,6 +26,31 @@ public struct BaseCommand: AsyncParsableCommand {
     public init() {}
 
     public func run() async throws {
+        guard let ipswPath = ipsw else {
+            throw VMError.installationFailed("Please specify the path to a local macOS IPSW file using --ipsw <path>")
+        }
+
+        try await VMInstaller.install(
+            name: name,
+            ipswPath: ipswPath,
+            cpu: cpu,
+            memory: memory,
+            diskSize: diskSize
+        )
+    }
+}
+
+// MARK: - MainActor-Isolated Installation Engine
+
+@MainActor
+public enum VMInstaller {
+    public static func install(
+        name: String,
+        ipswPath: String,
+        cpu: Int,
+        memory: Int,
+        diskSize: Int
+    ) async throws {
         guard VZVirtualMachine.isSupported else {
             throw VMError.unsupportedHardware
         }
@@ -38,11 +62,6 @@ public struct BaseCommand: AsyncParsableCommand {
             try FileManager.default.removeItem(at: vmDir)
         }
 
-        guard let ipswPath = ipsw else {
-            throw VMError.installationFailed("Please specify the path to a local macOS IPSW file using --ipsw <path>")
-        }
-
-        // Expand '~' and resolve to an absolute standardized URL
         let expandedPath = NSString(string: ipswPath).expandingTildeInPath
         let localRestoreImageURL: URL
         if expandedPath.hasPrefix("/") {
@@ -107,14 +126,14 @@ public struct BaseCommand: AsyncParsableCommand {
             options: [.allowOverwrite]
         )
 
-        // 4. Persist Hardware Model, Machine Identifier, and Config
+        // 4. Persist Metadata
         print("[3/6] Saving VM hardware metadata...")
         let machineIdentifier = VZMacMachineIdentifier()
         try supportedConfig.hardwareModel.dataRepresentation.write(to: config.hardwareModelURL)
         try machineIdentifier.dataRepresentation.write(to: config.machineIdentifierURL)
         try config.save()
 
-        // 5. Build minimal configuration required for installation
+        // 5. Construct VM Configuration
         print("[4/6] Building installation configuration...")
         let vmConfig = VZVirtualMachineConfiguration()
         let platform = VZMacPlatformConfiguration()
@@ -136,7 +155,7 @@ public struct BaseCommand: AsyncParsableCommand {
         print("[5/6] Validating configuration...")
         try vmConfig.validate()
 
-        // 6. Initialize Hypervisor and Installer explicitly on the Main Queue
+        // 6. Execute Installer explicitly on the Main Queue
         print("[6/6] Initializing macOS installer...")
         let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
         let installer = VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: restoreImage.url)

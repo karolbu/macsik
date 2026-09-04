@@ -2,7 +2,6 @@ import Foundation
 import ArgumentParser
 import Virtualization
 
-@MainActor
 public struct BuildCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "build",
@@ -33,6 +32,31 @@ public struct BuildCommand: AsyncParsableCommand {
     public init() {}
 
     public func run() async throws {
+        try await VMRunner.runBuild(
+            name: name,
+            cmd: cmd,
+            user: user,
+            password: password,
+            sshKey: sshKey,
+            ephemeral: ephemeral,
+            timeout: timeout
+        )
+    }
+}
+
+// MARK: - MainActor-Isolated Build Runner Engine
+
+@MainActor
+public enum VMRunner {
+    public static func runBuild(
+        name: String,
+        cmd: String,
+        user: String,
+        password: String,
+        sshKey: String?,
+        ephemeral: Bool,
+        timeout: Double
+    ) async throws {
         guard VZVirtualMachine.isSupported else {
             throw VMError.unsupportedHardware
         }
@@ -98,7 +122,7 @@ public struct BuildCommand: AsyncParsableCommand {
         }
     }
 
-    private func buildHeadlessVM(config: VMConfig) throws -> VZVirtualMachine {
+    private static func buildHeadlessVM(config: VMConfig) throws -> VZVirtualMachine {
         let vmConfig = VZVirtualMachineConfiguration()
 
         guard let hwModelData = try? Data(contentsOf: config.hardwareModelURL),
