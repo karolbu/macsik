@@ -34,7 +34,7 @@ public struct InjectCommand: AsyncParsableCommand {
     }
 }
 
-// MARK: - AppKit GUI Host Application Delegate
+// MARK: - AppKit Host Application Delegate
 
 @MainActor
 final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate {
@@ -56,18 +56,23 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             print("4. When finished, shut down the VM via Apple Menu -> Shut Down.")
             fflush(stdout)
 
+            // 1. Setup minimal Main Menu so WindowServer treats process as a fully managed GUI app
+            setupApplicationMenu()
+
+            // 2. Build VM and View
             let vmConfig = try buildVMConfiguration()
-            let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
+            let vm = VZVirtualMachine(configuration: vmConfig)
             self.virtualMachine = vm
             vm.delegate = self
 
-            // 1. Configure the Virtual Machine View
             let vmView = VZVirtualMachineView()
             vmView.virtualMachine = vm
             vmView.capturesSystemKeys = true
-            vmView.automaticallyReconfiguresDisplay = true
+            if #available(macOS 14.0, *) {
+                vmView.automaticallyReconfiguresDisplay = true
+            }
 
-            // 2. Setup Host Window sized appropriately for 1512x982 display
+            // 3. Create and position the Host Window
             let windowSize = NSSize(width: 1200, height: 750)
             let window = NSWindow(
                 contentRect: NSRect(origin: .zero, size: windowSize),
@@ -76,29 +81,31 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 defer: false
             )
             window.title = "MacBuilder Setup: \(config.name)"
-            
-            // Set vmView directly as root contentView to enable Metal layer compositing
             window.contentView = vmView
             window.center()
+            window.isReleasedWhenClosed = false
             window.delegate = self
             self.window = window
 
+            // 4. Force WindowServer & RunningBoard promotion to running-Active
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate()
+            window.orderFrontRegardless()
+            NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
 
-            print("Starting hypervisor...")
+            print("Booting virtual machine...")
             fflush(stdout)
 
-            vm.start { [weak self] result in
-                switch result {
-                case .success:
+            // 5. Start VM asynchronously so AppKit runloop spins freely
+            Task {
+                do {
+                    try await vm.start()
                     print("Hypervisor running. macOS guest kernel is booting...")
-                    print("Note: First boot takes 25-45 seconds to initialize WindowServer and show Setup Assistant.")
+                    print("Note: First boot takes ~25-40 seconds for the Apple logo and language picker to appear.")
                     fflush(stdout)
-                case .failure(let error):
+                } catch {
                     print("Failed to start VM: \(error.localizedDescription)")
                     fflush(stdout)
-                    self?.terminateApp()
+                    self.terminateApp()
                 }
             }
         } catch {
@@ -106,6 +113,17 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             fflush(stdout)
             terminateApp()
         }
+    }
+
+    private func setupApplicationMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+        appMenu.addItem(withTitle: "Quit \(config.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        NSApp.mainMenu = mainMenu
     }
 
     private func buildVMConfiguration() throws -> VZVirtualMachineConfiguration {
@@ -141,27 +159,16 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // Dynamically match the host MacBook's Liquid Retina display characteristics
+        // Standard 16:10 MacBook Retina display resolution
         let graphics = VZMacGraphicsDeviceConfiguration()
-        if let screen = NSScreen.main {
-            let display = VZMacGraphicsDisplayConfiguration(
-                for: screen,
-                sizeInPoints: NSSize(width: 1200, height: 750)
-            )
-            graphics.displays = [display]
-        } else {
-            graphics.displays = [
-                VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)
-            ]
-        }
+        graphics.displays = [
+            VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 220)
+        ]
         vmConfig.graphicsDevices = [graphics]
 
-        // Input Devices
+        // Input Devices: Single standard coordinate pointer avoids scanout contention
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
-        vmConfig.pointingDevices = [
-            VZUSBScreenCoordinatePointingDeviceConfiguration(),
-            VZMacTrackpadConfiguration()
-        ]
+        vmConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
 
         try vmConfig.validate()
         return vmConfig
