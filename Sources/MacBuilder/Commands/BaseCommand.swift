@@ -2,7 +2,7 @@ import Foundation
 import ArgumentParser
 import Virtualization
 
-public struct BaseCommand: AsyncParsableCommand {
+public struct BaseCommand: AsyncParsableCommand, Sendable {
     public static let configuration = CommandConfiguration(
         commandName: "base",
         abstract: "Installs macOS from an IPSW restore image into a managed base VM."
@@ -58,7 +58,7 @@ public struct BaseCommand: AsyncParsableCommand {
 
         try FileManager.default.createDirectory(at: vmDir, withIntermediateDirectories: true)
 
-        // 2. Load Restore Image using Apple's native async API
+        // 2. Load Restore Image metadata using Apple's native async API
         print("Loading restore image metadata...")
         let restoreImage: VZMacOSRestoreImage
         do {
@@ -106,24 +106,7 @@ public struct BaseCommand: AsyncParsableCommand {
         try machineIdentifier.dataRepresentation.write(to: config.machineIdentifierURL)
         try config.save()
 
-        // 6. Execute Installation on MainActor
-        try await performInstallation(
-            name: name,
-            config: config,
-            supportedConfig: supportedConfig,
-            machineIdentifier: machineIdentifier,
-            localRestoreImageURL: localRestoreImageURL
-        )
-    }
-
-    @MainActor
-    private func performInstallation(
-        name: String,
-        config: VMConfig,
-        supportedConfig: VZMacOSConfigurationRequirements,
-        machineIdentifier: VZMacMachineIdentifier,
-        localRestoreImageURL: URL
-    ) async throws {
+        // 6. Build VM Configuration
         let vmConfig = VZVirtualMachineConfiguration()
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = supportedConfig.hardwareModel
@@ -157,6 +140,7 @@ public struct BaseCommand: AsyncParsableCommand {
 
         try vmConfig.validate()
 
+        // 7. Execute Native Async Installation
         let vm = VZVirtualMachine(configuration: vmConfig)
         let installer = VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: localRestoreImageURL)
 
