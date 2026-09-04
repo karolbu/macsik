@@ -2,7 +2,7 @@ import Foundation
 import ArgumentParser
 import Virtualization
 
-public struct BaseCommand: AsyncParsableCommand {
+public struct BaseCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "base",
         abstract: "Installs macOS from an IPSW restore image into a managed base VM."
@@ -25,7 +25,7 @@ public struct BaseCommand: AsyncParsableCommand {
 
     public init() {}
 
-    public func run() async throws {
+    public mutating func run() throws {
         guard VZVirtualMachine.isSupported else {
             throw VMError.unsupportedHardware
         }
@@ -35,33 +35,49 @@ public struct BaseCommand: AsyncParsableCommand {
             throw VMError.vmAlreadyExists(name)
         }
 
-        print("=== Initializing Base macOS Installation [\(name)] ===")
-        try FileManager.default.createDirectory(at: vmDir, withIntermediateDirectories: true)
-
-        let localRestoreImageURL: URL
-        let restoreImage: VZMacOSRestoreImage
-
-        if let ipsw {
-            localRestoreImageURL = URL(fileURLWithPath: ipsw)
-            guard FileManager.default.fileExists(atPath: localRestoreImageURL.path) else {
-                throw VMError.fileNotFound(localRestoreImageURL.path)
-            }
-            print("Loading restore image metadata from local file...")
-            restoreImage = try await VZMacOSRestoreImage.image(from: localRestoreImageURL)
-        } else {
-            print("No IPSW provided. Fetching latest supported restore image metadata from Apple...")
-            let remoteImage = try await VZMacOSRestoreImage.latestSupported
-            guard remoteImage.isSupported else {
-                throw VMError.installationFailed("The latest restore image is not supported by this host.")
-            }
-
-            localRestoreImageURL = vmDir.appendingPathComponent("RestoreImage.ipsw")
-            print("Downloading restore image from \(remoteImage.url)...")
-            let (tempDownloadedURL, _) = try await URLSession.shared.download(from: remoteImage.url)
-            try FileManager.default.moveItem(at: tempDownloadedURL, to: localRestoreImageURL)
-            restoreImage = try await VZMacOSRestoreImage.image(from: localRestoreImageURL)
+        guard let ipswPath = ipsw else {
+            throw VMError.installationFailed("Please specify the path to a local macOS IPSW file using --ipsw <path>")
         }
 
+        // 1. Resolve to an absolute, standardized file URL
+        let currentDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let localRestoreImageURL = URL(fileURLWithPath: ipswPath, relativeTo: currentDir).standardizedFileURL.absoluteURL
+
+        guard FileManager.default.fileExists(atPath: localRestoreImageURL.path) else {
+            throw VMError.fileNotFound(localRestoreImageURL.path)
+        }
+
+        print("=== Initializing Base macOS Installation [\(name)] ===")
+        print("Using restore image: \(localRestoreImageURL.path)")
+
+        try FileManager.default.createDirectory(at: vmDir, withIntermediateDirectories: true)
+
+        // 2. Load Restore Image on the Main RunLoop
+        print("Loading restore image metadata...")
+        var loadedImage: VZMacOSRestoreImage?
+        var loadError: Error?
+        let currentRunLoop = CFRunLoopGetCurrent()
+
+        VZMacOSRestoreImage.load(from: localRestoreImageURL) { result in
+            switch result {
+            case .success(let image):
+                loadedImage = image
+            case .failure(let error):
+                loadError = error
+            }
+            CFRunLoopStop(currentRunLoop)
+        }
+        CFRunLoopRun()
+
+        if let loadError {
+            throw VMError.installationFailed("Failed to load restore image: \(loadError.localizedDescription)")
+        }
+        guard let restoreImage = loadedImage else {
+            throw VMError.installationFailed("Failed to load restore image: unknown error.")
+        }
+        guard restoreImage.isSupported else {
+            throw VMError.installationFailed("The restore image is not supported by this host.")
+        }
         guard let supportedConfig = restoreImage.mostFeaturefulSupportedConfiguration else {
             throw VMError.installationFailed("No compatible hardware configuration found for this Mac host.")
         }
@@ -76,14 +92,14 @@ public struct BaseCommand: AsyncParsableCommand {
             macAddress: macAddress
         )
 
-        // 1. Allocate Sparse Disk
+        // 3. Allocate Sparse Disk
         print("Allocating \(diskSize) GB sparse disk...")
         FileManager.default.createFile(atPath: config.diskURL.path, contents: nil)
         let diskHandle = try FileHandle(forWritingTo: config.diskURL)
         try diskHandle.truncate(atOffset: diskSizeBytes)
         try diskHandle.close()
 
-        // 2. Initialize Auxiliary Storage
+        // 4. Initialize NVRAM Auxiliary Storage
         print("Initializing NVRAM auxiliary storage...")
         _ = try VZMacAuxiliaryStorage(
             creatingStorageAt: config.auxiliaryStorageURL,
@@ -91,13 +107,13 @@ public struct BaseCommand: AsyncParsableCommand {
             options: []
         )
 
-        // 3. Persist Model, Identifier, and Config
+        // 5. Persist Model, Identifier, and Config
         let machineIdentifier = VZMacMachineIdentifier()
         try supportedConfig.hardwareModel.dataRepresentation.write(to: config.hardwareModelURL)
         try machineIdentifier.dataRepresentation.write(to: config.machineIdentifierURL)
         try config.save()
 
-        // 4. Construct VM Configuration
+        // 6. Construct VM Configuration
         let vmConfig = VZVirtualMachineConfiguration()
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = supportedConfig.hardwareModel
@@ -113,16 +129,16 @@ public struct BaseCommand: AsyncParsableCommand {
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        networkDevice.macAddress = VZMACAddress(string: config.macAddress)!
+        if let mac = VZMACAddress(string: config.macAddress) {
+            networkDevice.macAddress = mac
+        }
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // Graphics configuration is strictly required by the framework
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)]
         vmConfig.graphicsDevices = [graphics]
 
-        // Valid pointing and keyboard configurations
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vmConfig.pointingDevices = [
             VZUSBScreenCoordinatePointingDeviceConfiguration(),
@@ -131,20 +147,36 @@ public struct BaseCommand: AsyncParsableCommand {
 
         try vmConfig.validate()
 
-        // 5. Run Installation
-        let vm = VZVirtualMachine(configuration: vmConfig)
+        // 7. Execute Installer bound explicitly to the Main RunLoop
+        let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
         let installer = VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: localRestoreImageURL)
 
-        print("Starting installation into \(name)...")
-        let observation = installer.progress.observe(\.fractionCompleted) { progress, _ in
+        print("Starting macOS installation into \(name)...")
+        var installError: Error?
+        let installRunLoop = CFRunLoopGetCurrent()
+
+        let observer = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
             let percent = String(format: "%.1f%%", progress.fractionCompleted * 100)
             print("\rInstalling macOS: \(percent)", terminator: "")
             fflush(stdout)
         }
 
-        try await installer.install()
-        observation.invalidate()
+        installer.install { result in
+            if case .failure(let error) = result {
+                installError = error
+            }
+            CFRunLoopStop(installRunLoop)
+        }
+
+        CFRunLoopRun()
+        observer.invalidate()
+
+        if let installError {
+            print("")
+            throw VMError.installationFailed(installError.localizedDescription)
+        }
+
         print("\nBase macOS installation completed successfully.")
-        print("Run 'macbuilder inject \(name)' to complete Setup Assistant and enable Remote Login.")
+        print("Execute 'macbuilder inject \(name)' to configure user credentials and remote login.")
     }
 }
