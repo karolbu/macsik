@@ -43,15 +43,73 @@ public struct InjectCommand: AsyncParsableCommand {
 final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate {
     private let config: VMConfig
     private var window: NSWindow?
-    private var virtualMachine: VZVirtualMachine?
     private var virtualMachineView: VZVirtualMachineView?
+    private var virtualMachine: VZVirtualMachine?
 
     init(config: VMConfig) {
         self.config = config
         super.init()
     }
 
+    // MARK: - NSApplicationDelegate Lifecycle
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupApplicationMenu()
+
+        // 1. Setup Host Window and View hierarchy first (matching Apple's Storyboard/Nib model)
+        let windowSize = NSSize(width: 1280, height: 800)
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: windowSize),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "MacBuilder Setup: \(config.name)"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        self.window = window
+
+        let vmView = VZVirtualMachineView(frame: NSRect(origin: .zero, size: windowSize))
+        vmView.autoresizingMask = [.width, .height]
+        self.virtualMachineView = vmView
+        window.contentView = vmView
+
+        window.makeKeyAndOrderFront(nil)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        // 2. Dispatch VM setup to the next runloop turn (matching Apple's sample implementation)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.startConfiguredVirtualMachine()
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let vm = virtualMachine, vm.state == .running {
+            if vm.canRequestStop {
+                try? vm.requestStop()
+            } else if vm.canStop {
+                vm.stop { _ in
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
+                return .terminateLater
+            }
+        }
+        return .terminateNow
+    }
+
+    // MARK: - Virtual Machine Construction & Execution
+
+    private func startConfiguredVirtualMachine() {
         do {
             print("=== Booting [\(config.name)] in GUI Mode ===")
             print("1. Complete macOS Setup Assistant in the opened window.")
@@ -60,53 +118,30 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             print("4. When finished, shut down the VM via Apple Menu -> Shut Down.")
             fflush(stdout)
 
-            setupApplicationMenu()
-
-            // 1. Build and validate configuration according to Apple reference guidelines
+            // 1. Construct VM Configuration
             let vmConfig = try buildVMConfiguration()
 
-            // 2. Initialize Virtual Machine strictly bound to DispatchQueue.main
-            let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
+            // 2. Initialize VZVirtualMachine matching Apple's standard initializer
+            let vm = VZVirtualMachine(configuration: vmConfig)
             self.virtualMachine = vm
             vm.delegate = self
 
-            // 3. Create Host Window
-            let windowSize = NSSize(width: 1280, height: 800)
-            let window = NSWindow(
-                contentRect: NSRect(origin: .zero, size: windowSize),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = "MacBuilder Setup: \(config.name)"
-            window.center()
-            window.isReleasedWhenClosed = false
-            window.delegate = self
-            self.window = window
-
-            // 4. Configure Virtual Machine View with valid AppKit autoresizing mask
-            let vmView = VZVirtualMachineView(frame: NSRect(origin: .zero, size: windowSize))
-            vmView.wantsLayer = true
-            vmView.autoresizingMask = [.width, .height]
+            // 3. Attach Virtual Machine to the active View
+            guard let vmView = self.virtualMachineView else {
+                throw VMError.configurationInvalid("Host VM view was deallocated.")
+            }
             vmView.virtualMachine = vm
             vmView.capturesSystemKeys = true
+
             if #available(macOS 14.0, *) {
+                // Configure the view to respond to dynamic display changes
                 vmView.automaticallyReconfiguresDisplay = true
             }
-            self.virtualMachineView = vmView
 
-            window.contentView = vmView
-            window.makeKeyAndOrderFront(nil)
-            if #available(macOS 14.0, *) {
-                NSApp.activate()
-            } else {
-                NSApp.activate(ignoringOtherApps: true)
-            }
-
-            print("Starting hypervisor...")
+            print("Starting hypervisor and guest operating system...")
             fflush(stdout)
 
-            // 5. Asynchronous boot using completion handler directly on main queue
+            // 4. Start Virtual Machine execution using completion handler
             vm.start { [weak self] result in
                 guard let self = self else { return }
                 switch result {
@@ -130,21 +165,12 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    private func setupApplicationMenu() {
-        let mainMenu = NSMenu()
-        let appMenuItem = NSMenuItem()
-        mainMenu.addItem(appMenuItem)
-
-        let appMenu = NSMenu()
-        appMenuItem.submenu = appMenu
-        appMenu.addItem(withTitle: "Quit Setup", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        NSApp.mainMenu = mainMenu
-    }
+    // MARK: - Hardware Configuration Pipeline
 
     private func buildVMConfiguration() throws -> VZVirtualMachineConfiguration {
         let vmConfig = VZVirtualMachineConfiguration()
 
-        // 1. Hardware Model
+        // 1. Hardware Model & Machine Identifier
         let hwModelData = try Data(contentsOf: config.hardwareModelURL)
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hwModelData) else {
             throw VMError.invalidHardwareModel
@@ -153,22 +179,22 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             throw VMError.unsupportedHardwareModel
         }
 
-        // 2. Machine Identifier
         let machineIDData = try Data(contentsOf: config.machineIdentifierURL)
         guard let machineIdentifier = VZMacMachineIdentifier(dataRepresentation: machineIDData) else {
             throw VMError.invalidMachineIdentifier
         }
 
-        // 3. Platform Configuration
+        // 2. Platform Configuration using contentsOf for saved NVRAM
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = hardwareModel
         platform.machineIdentifier = machineIdentifier
-        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: config.auxiliaryStorageURL)
+        platform.auxiliaryStorage = VZMacAuxiliaryStorage(contentsOf: config.auxiliaryStorageURL)
         vmConfig.platform = platform
 
+        // 3. Bootloader
         vmConfig.bootLoader = VZMacOSBootLoader()
 
-        // 4. Resource Allocation clamped within framework limits
+        // 4. Resource Allocation
         let requestedCPU = config.cpuCount
         let minCPU = VZVirtualMachineConfiguration.minimumAllowedCPUCount
         let maxCPU = VZVirtualMachineConfiguration.maximumAllowedCPUCount
@@ -179,42 +205,54 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let maxRAM = VZVirtualMachineConfiguration.maximumAllowedMemorySize
         vmConfig.memorySize = min(max(requestedRAM, minRAM), maxRAM)
 
-        // 5. Virtual Storage Devices
+        // 5. Virtual Block Storage (Disk Image)
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: config.diskURL, readOnly: false)
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
-        // 6. Network Devices
+        // 6. Network Device
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        guard let mac = VZMACAddress(string: config.macAddress) else {
-            throw VMError.configurationInvalid("Invalid MAC address: \(config.macAddress)")
+        if let mac = VZMACAddress(string: config.macAddress) {
+            networkDevice.macAddress = mac
         }
-        networkDevice.macAddress = mac
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // 7. Graphics Display Configuration
+        // 7. Graphics Display Configuration (matching Apple's 80 PPI baseline)
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [
-            VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 220)
+            VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 80)
         ]
         vmConfig.graphicsDevices = [graphics]
 
-        // 8. Input Devices
+        // 8. Human Interface Devices
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vmConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
 
-        // 9. Audio Device (Output stream prevents guest CoreAudio setup daemon stalls)
+        // 9. Virtio Audio Device
         let audioConfig = VZVirtioSoundDeviceConfiguration()
         let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
         outputStream.sink = VZHostAudioOutputStreamSink()
         audioConfig.streams = [outputStream]
         vmConfig.audioDevices = [audioConfig]
 
+        // 10. Validate Full Configuration
         try vmConfig.validate()
+
         return vmConfig
     }
 
-    // MARK: - Lifecycle Management
+    // MARK: - Window and App Management
+
+    private func setupApplicationMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+        appMenu.addItem(withTitle: "Quit Setup", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        NSApp.mainMenu = mainMenu
+    }
 
     func windowWillClose(_ notification: Notification) {
         print("\nWindow closed. Terminating virtual machine session...")
@@ -228,6 +266,8 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         terminateApp()
     }
+
+    // MARK: - VZVirtualMachineDelegate
 
     nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         Task { @MainActor in
@@ -245,7 +285,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    func terminateApp() {
+    private func terminateApp() {
         if NSApp.isRunning {
             NSApp.stop(nil)
             let dummyEvent = NSEvent.otherEvent(
