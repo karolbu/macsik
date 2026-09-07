@@ -1,0 +1,13 @@
+Based on the attached example from the Apple Virtualization Framework documentation, build a Command Line Interface (CLI) tool designed for managing macOS virtual machines. 
+
+The tool should currently support 3 core commands (architecture should be extensible to easily add more commands in the future):
+
+1. `install`: Installs a new macOS virtual machine from an IPSW image or official restore image.
+2. `setup` (GUI mode): Launches the VM with a graphical interface to allow manual software installation and configuration (e.g., installing Xcode, signing into Apple ID, adjusting settings).
+3. `run` (Headless mode): Runs the pre-configured VM in headless mode (without a visual window) dedicated to automated application building and CI/CD tasks.
+
+Requirements:
+- Use Swift and native Virtualization Framework (VZVirtualMachine).
+- Structure the code cleanly (e.g., using Swift Argument Parser for the CLI interface).
+- Provide robust error handling, progress indicators for the installation phase, and clear console output/logging.
+- Ensure proper resource cleanup and graceful termination handling (e.g., stopping the VM safely on SIGINT/Ctrl+C).
