@@ -2,6 +2,7 @@ import Foundation
 import ArgumentParser
 import Virtualization
 import AppKit
+import Security
 
 public struct InjectCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -19,6 +20,9 @@ public struct InjectCommand: AsyncParsableCommand {
             throw VMError.unsupportedHardware
         }
 
+        // Pre-flight check: Verify the executing binary has the virtualization entitlement
+        try Self.verifyVirtualizationEntitlement()
+
         let config = try VMConfig.load(name: name)
 
         await MainActor.run {
@@ -32,6 +36,33 @@ public struct InjectCommand: AsyncParsableCommand {
             }
         }
     }
+
+    private static func verifyVirtualizationEntitlement() throws {
+        var secCode: SecCode?
+        guard SecCodeCopySelf([], &secCode) == errSecSuccess, let code = secCode else {
+            return
+        }
+
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else {
+            return
+        }
+
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, [.entitlementsDict], &information) == errSecSuccess,
+              let info = information as? [String: Any],
+              let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] else {
+            print("⚠️ Warning: Could not read code-signing entitlements from current process.")
+            return
+        }
+
+        if entitlements["com.apple.security.virtualization"] as? Bool != true {
+            print("\n❌ FATAL: The executing binary is missing the 'com.apple.security.virtualization' entitlement.")
+            print("Run the following command to sign the binary before executing:\n")
+            print("  codesign --force --sign - --entitlements entitlements.plist .build/release/macbuilder\n")
+            throw VMError.configurationInvalid("Missing com.apple.security.virtualization entitlement.")
+        }
+    }
 }
 
 // MARK: - AppKit GUI Host Application Delegate
@@ -41,6 +72,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private let config: VMConfig
     private var window: NSWindow?
     private var virtualMachine: VZVirtualMachine?
+    private var bootTimeoutTask: Task<Void, Never>?
 
     init(config: VMConfig) {
         self.config = config
@@ -58,11 +90,15 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
             setupApplicationMenu()
 
+            // 1. Build and validate configuration
             let vmConfig = try buildVMConfiguration()
-            let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
+
+            // 2. Initialize Virtual Machine without explicit main queue to prevent XPC deadlocks
+            let vm = VZVirtualMachine(configuration: vmConfig)
             self.virtualMachine = vm
             vm.delegate = self
 
+            // 3. Configure Virtual Machine View
             let vmView = VZVirtualMachineView()
             vmView.virtualMachine = vm
             vmView.capturesSystemKeys = true
@@ -70,6 +106,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 vmView.automaticallyReconfiguresDisplay = true
             }
 
+            // 4. Create Host Window
             let windowSize = NSSize(width: 1200, height: 750)
             let window = NSWindow(
                 contentRect: NSRect(origin: .zero, size: windowSize),
@@ -88,26 +125,49 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             window.orderFrontRegardless()
             NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
 
-            print("Booting virtual machine...")
+            print("Starting hypervisor and spawning virtualization service...")
             fflush(stdout)
 
-            // Start VM directly on the main queue
-            vm.start { [weak self] result in
-                switch result {
-                case .success:
-                    print("Hypervisor running. Guest kernel is booting...")
-                    print("Note: First boot takes 25-40 seconds for the Apple logo and language picker to appear.")
+            // 5. Watchdog: Catch silent XPC service spawn failures
+            startWatchdogTimer()
+
+            // 6. Asynchronous boot using Swift Concurrency
+            Task {
+                do {
+                    try await vm.start()
+                    self.bootTimeoutTask?.cancel()
+                    print("✅ Hypervisor running. macOS guest kernel is booting...")
+                    print("Note: First boot takes ~25-40 seconds for the Apple logo and language picker to appear.")
                     fflush(stdout)
-                case .failure(let error):
-                    print("Failed to start VM: \(error.localizedDescription)")
+                } catch {
+                    self.bootTimeoutTask?.cancel()
+                    print("\n❌ Failed to start Virtual Machine: \(error.localizedDescription)")
+                    if let vzError = error as? VZError {
+                        print("Details: \(vzError)")
+                    }
                     fflush(stdout)
-                    self?.terminateApp()
+                    self.terminateApp()
                 }
             }
         } catch {
-            print("Configuration Error: \(error.localizedDescription)")
+            print("\n❌ Configuration Error: \(error.localizedDescription)")
             fflush(stdout)
             terminateApp()
+        }
+    }
+
+    private func startWatchdogTimer() {
+        bootTimeoutTask = Task {
+            try? await Task.sleep(for: .seconds(20))
+            if !Task.isCancelled {
+                print("\n❌ ERROR: Hypervisor service (com.apple.Virtualization.VirtualMachine) failed to respond within 20 seconds.")
+                print("Probable causes:")
+                print(" 1. The binary code signature does not contain 'com.apple.security.virtualization'.")
+                print(" 2. Another hypervisor or VM instance holds an exclusive lock on the disk image.")
+                print(" 3. System Integrity / AMFI blocked the XPC helper service.")
+                fflush(stdout)
+                self.terminateApp()
+            }
         }
     }
 
@@ -145,9 +205,11 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         vmConfig.cpuCount = min(config.cpuCount, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
         vmConfig.memorySize = min(config.memorySizeMB * 1024 * 1024, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
 
+        // Storage Device Attachment
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: config.diskURL, readOnly: false)
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
+        // Network Device Attachment
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
         if let mac = VZMACAddress(string: config.macAddress) {
             networkDevice.macAddress = mac
@@ -155,14 +217,14 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // 16:10 MacBook standard Retina virtual display
+        // Display Configuration
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [
             VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 220)
         ]
         vmConfig.graphicsDevices = [graphics]
 
-        // Input Devices
+        // Single USB Pointing Device avoids coordinate system contention
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vmConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
 
@@ -173,8 +235,9 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // MARK: - Lifecycle Management
 
     func windowWillClose(_ notification: Notification) {
-        print("\nWindow closed by user. Requesting guest shutdown...")
+        print("\nWindow closed. Terminating session...")
         fflush(stdout)
+        bootTimeoutTask?.cancel()
         if let vm = virtualMachine, vm.canRequestStop {
             try? vm.requestStop()
         }
@@ -185,19 +248,22 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         Task { @MainActor in
             print("\nGuest OS shutdown detected. Closing GUI session.")
             fflush(stdout)
+            self.bootTimeoutTask?.cancel()
             self.terminateApp()
         }
     }
 
     nonisolated func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
         Task { @MainActor in
-            print("\nVirtual Machine stopped with error: \(error.localizedDescription)")
+            print("\n❌ Virtual Machine stopped unexpectedly with error: \(error.localizedDescription)")
             fflush(stdout)
+            self.bootTimeoutTask?.cancel()
             self.terminateApp()
         }
     }
 
     func terminateApp() {
+        bootTimeoutTask?.cancel()
         NSApp.stop(nil)
         let dummyEvent = NSEvent.otherEvent(
             with: .applicationDefined,
