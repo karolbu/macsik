@@ -5,6 +5,10 @@ public enum VMError: LocalizedError, Sendable {
     case vmAlreadyExists(String)
     case invalidHardwareModel
     case invalidMachineIdentifier
+    case unsupportedHardwareModel
+    case missingAuxiliaryStorage
+    case missingDiskImage
+    case missingEntitlement(String)
     case configurationInvalid(String)
     case installationFailed(String)
     case bootFailed(String)
@@ -23,6 +27,14 @@ public enum VMError: LocalizedError, Sendable {
             return "Failed to deserialize VZMacHardwareModel from storage."
         case .invalidMachineIdentifier:
             return "Failed to deserialize VZMacMachineIdentifier from storage."
+        case .unsupportedHardwareModel:
+            return "The serialized hardware model is not supported on this host hardware."
+        case .missingAuxiliaryStorage:
+            return "The NVRAM auxiliary storage file is missing from the VM directory."
+        case .missingDiskImage:
+            return "The virtual disk image (Disk.img) is missing from the VM directory."
+        case .missingEntitlement(let details):
+            return "Code signing validation failed: \(details)"
         case .configurationInvalid(let reason):
             return "Invalid virtual machine configuration: \(reason)"
         case .installationFailed(let reason):

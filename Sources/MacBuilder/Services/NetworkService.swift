@@ -5,7 +5,7 @@ import Darwin
 public final class NetworkService: Sendable {
     public init() {}
 
-    /// Resolves the guest IP address assigned to a specific MAC address via Apple NAT DHCP or ARP cache.
+    /// Resolves the guest IP address assigned to a specific MAC address via Apple NAT DHCP leases or ARP cache.
     public func resolveGuestIP(macAddress: String, timeout: TimeInterval = 60.0) async throws -> String {
         let normalizedTargetMAC = normalizeMAC(macAddress)
         let deadline = Date().addingTimeInterval(timeout)
@@ -111,7 +111,6 @@ public final class NetworkService: Sendable {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let output = String(data: data, encoding: .utf8) else { return nil }
 
-            // Matches ARP lines formatted as: ? (192.168.64.4) at 5a:94:ef:12:34:56 on bridge100 ...
             let arpPattern = #"\(([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\)\s+at\s+([0-9a-fA-F:]+)"#
             guard let regex = try? NSRegularExpression(pattern: arpPattern) else { return nil }
 

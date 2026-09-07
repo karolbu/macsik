@@ -61,6 +61,8 @@ public enum VMRunner {
             throw VMError.unsupportedHardware
         }
 
+        try VMConfig.verifyVirtualizationEntitlement()
+
         let runName = ephemeral ? "\(name)-ephemeral-\(UUID().uuidString.prefix(8))" : name
         let targetConfig: VMConfig
 
@@ -69,6 +71,7 @@ public enum VMRunner {
             targetConfig = try VMConfig.clone(from: name, to: runName)
         } else {
             targetConfig = try VMConfig.load(name: name)
+            try targetConfig.validateFilesExist()
         }
 
         defer {
@@ -125,34 +128,46 @@ public enum VMRunner {
     private static func buildHeadlessVM(config: VMConfig) throws -> VZVirtualMachine {
         let vmConfig = VZVirtualMachineConfiguration()
 
-        guard let hwModelData = try? Data(contentsOf: config.hardwareModelURL),
-              let hardwareModel = VZMacHardwareModel(dataRepresentation: hwModelData) else {
+        try config.validateFilesExist()
+
+        let hwModelData = try Data(contentsOf: config.hardwareModelURL)
+        guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hwModelData) else {
             throw VMError.invalidHardwareModel
         }
+        guard hardwareModel.isSupported else {
+            throw VMError.unsupportedHardwareModel
+        }
 
-        guard let machineIDData = try? Data(contentsOf: config.machineIdentifierURL),
-              let machineIdentifier = VZMacMachineIdentifier(dataRepresentation: machineIDData) else {
+        let machineIDData = try Data(contentsOf: config.machineIdentifierURL)
+        guard let machineIdentifier = VZMacMachineIdentifier(dataRepresentation: machineIDData) else {
             throw VMError.invalidMachineIdentifier
         }
 
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = hardwareModel
         platform.machineIdentifier = machineIdentifier
-        platform.auxiliaryStorage = VZMacAuxiliaryStorage(contentsOf: config.auxiliaryStorageURL)
+        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: config.auxiliaryStorageURL)
         vmConfig.platform = platform
 
         vmConfig.bootLoader = VZMacOSBootLoader()
-        vmConfig.cpuCount = min(config.cpuCount, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
-        vmConfig.memorySize = min(config.memorySizeMB * 1024 * 1024, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
+
+        let effectiveCPU = max(config.cpuCount, hardwareModel.minimumSupportedCPUCount)
+        let effectiveRAM = max(config.memorySizeMB * 1024 * 1024, hardwareModel.minimumSupportedMemorySize)
+        vmConfig.cpuCount = min(effectiveCPU, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
+        vmConfig.memorySize = min(effectiveRAM, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
 
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: config.diskURL, readOnly: false)
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        networkDevice.macAddress = VZMACAddress(string: config.macAddress)!
+        guard let mac = VZMACAddress(string: config.macAddress) else {
+            throw VMError.configurationInvalid("Invalid MAC address: \(config.macAddress)")
+        }
+        networkDevice.macAddress = mac
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
+        // Framebuffer initialization required for guest WindowServer startup
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1080, pixelsPerInch: 144)]
         vmConfig.graphicsDevices = [graphics]

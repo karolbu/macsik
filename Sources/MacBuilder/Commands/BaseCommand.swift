@@ -55,6 +55,8 @@ public enum VMInstaller {
             throw VMError.unsupportedHardware
         }
 
+        try VMConfig.verifyVirtualizationEntitlement()
+
         let vmDir = VMConfig.baseStorageURL.appendingPathComponent(name, isDirectory: true)
 
         if FileManager.default.fileExists(atPath: vmDir.path) {
@@ -90,11 +92,11 @@ public enum VMInstaller {
         }
 
         guard restoreImage.isSupported else {
-            throw VMError.installationFailed("The restore image is not supported by this Mac host hardware.")
+            throw VMError.installationFailed("The restore image is not supported by this host hardware.")
         }
 
         guard let supportedConfig = restoreImage.mostFeaturefulSupportedConfiguration else {
-            throw VMError.installationFailed("No compatible hardware configuration found for this Mac host.")
+            throw VMError.installationFailed("No compatible hardware configuration found for this host hardware.")
         }
 
         guard supportedConfig.hardwareModel.isSupported else {
@@ -111,7 +113,7 @@ public enum VMInstaller {
             macAddress: macAddress
         )
 
-        // 2. Allocate Sparse Disk
+        // 2. Allocate Sparse Virtual Disk
         print("[1/6] Allocating \(diskSize) GB sparse disk...")
         FileManager.default.createFile(atPath: config.diskURL.path, contents: nil)
         let diskHandle = try FileHandle(forWritingTo: config.diskURL)
@@ -126,7 +128,7 @@ public enum VMInstaller {
             options: [.allowOverwrite]
         )
 
-        // 4. Persist Metadata
+        // 4. Persist Hardware Metadata
         print("[3/6] Saving VM hardware metadata...")
         let machineIdentifier = VZMacMachineIdentifier()
         try supportedConfig.hardwareModel.dataRepresentation.write(to: config.hardwareModelURL)
@@ -155,7 +157,7 @@ public enum VMInstaller {
         print("[5/6] Validating configuration...")
         try vmConfig.validate()
 
-        // 6. Execute Installer explicitly on the Main Queue
+        // 6. Execute Installer on the Main Dispatch Queue
         print("[6/6] Initializing macOS installer...")
         let vm = VZVirtualMachine(configuration: vmConfig, queue: .main)
         let installer = VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: restoreImage.url)

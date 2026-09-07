@@ -52,6 +52,21 @@ public struct VMConfig: Codable, Sendable {
         vmDirectory.appendingPathComponent("config.json")
     }
 
+    public func validateFilesExist() throws {
+        guard FileManager.default.fileExists(atPath: diskURL.path) else {
+            throw VMError.missingDiskImage
+        }
+        guard FileManager.default.fileExists(atPath: auxiliaryStorageURL.path) else {
+            throw VMError.missingAuxiliaryStorage
+        }
+        guard FileManager.default.fileExists(atPath: hardwareModelURL.path) else {
+            throw VMError.fileNotFound(hardwareModelURL.path)
+        }
+        guard FileManager.default.fileExists(atPath: machineIdentifierURL.path) else {
+            throw VMError.fileNotFound(machineIdentifierURL.path)
+        }
+    }
+
     public func save() throws {
         try FileManager.default.createDirectory(at: vmDirectory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
@@ -73,6 +88,8 @@ public struct VMConfig: Codable, Sendable {
     /// Performs an instantaneous APFS Copy-on-Write clone of the VM bundle.
     public static func clone(from sourceName: String, to targetName: String) throws -> VMConfig {
         let sourceConfig = try load(name: sourceName)
+        try sourceConfig.validateFilesExist()
+
         let targetDir = Self.baseStorageURL.appendingPathComponent(targetName, isDirectory: true)
 
         try FileManager.default.createDirectory(at: Self.baseStorageURL, withIntermediateDirectories: true)
@@ -99,6 +116,33 @@ public struct VMConfig: Codable, Sendable {
         let dir = Self.baseStorageURL.appendingPathComponent(name, isDirectory: true)
         if FileManager.default.fileExists(atPath: dir.path) {
             try FileManager.default.removeItem(at: dir)
+        }
+    }
+
+    /// Validates that the current running process possesses the required com.apple.security.virtualization entitlement.
+    public static func verifyVirtualizationEntitlement() throws {
+        var secCode: SecCode?
+        guard SecCodeCopySelf([], &secCode) == errSecSuccess, let code = secCode else {
+            throw VMError.missingEntitlement("Unable to inspect process dynamic code signature.")
+        }
+
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else {
+            throw VMError.missingEntitlement("Unable to obtain static code object.")
+        }
+
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(), &information) == errSecSuccess,
+              let info = information as? [String: Any] else {
+            throw VMError.missingEntitlement("Unable to extract code signing dictionary.")
+        }
+
+        guard let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] else {
+            throw VMError.missingEntitlement("No entitlements dictionary embedded in binary. Execute: codesign --force --sign - --entitlements entitlements.plist <binary>")
+        }
+
+        guard entitlements["com.apple.security.virtualization"] as? Bool == true else {
+            throw VMError.missingEntitlement("The 'com.apple.security.virtualization' entitlement is missing or set to false.")
         }
     }
 }
