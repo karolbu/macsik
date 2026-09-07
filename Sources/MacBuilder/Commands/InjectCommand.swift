@@ -49,18 +49,19 @@ public struct InjectCommand: AsyncParsableCommand {
         }
 
         var information: CFDictionary?
-        guard SecCodeCopySigningInformation(staticCode, [.entitlementsDict], &information) == errSecSuccess,
-              let info = information as? [String: Any],
-              let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] else {
-            print("⚠️ Warning: Could not read code-signing entitlements from current process.")
+        // SecCSFlags() initializes the default flags (rawValue = 0)
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(), &information) == errSecSuccess,
+              let info = information as? [String: Any] else {
             return
         }
 
-        if entitlements["com.apple.security.virtualization"] as? Bool != true {
-            print("\n❌ FATAL: The executing binary is missing the 'com.apple.security.virtualization' entitlement.")
-            print("Run the following command to sign the binary before executing:\n")
-            print("  codesign --force --sign - --entitlements entitlements.plist .build/release/macbuilder\n")
-            throw VMError.configurationInvalid("Missing com.apple.security.virtualization entitlement.")
+        if let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] {
+            if entitlements["com.apple.security.virtualization"] as? Bool != true {
+                print("\n❌ FATAL: The executing binary is missing the 'com.apple.security.virtualization' entitlement.")
+                print("Run the following command to sign the binary before executing:\n")
+                print("  codesign --force --sign - --entitlements entitlements.plist .build/release/macbuilder\n")
+                throw VMError.configurationInvalid("Missing com.apple.security.virtualization entitlement.")
+            }
         }
     }
 }
@@ -93,7 +94,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             // 1. Build and validate configuration
             let vmConfig = try buildVMConfiguration()
 
-            // 2. Initialize Virtual Machine without explicit main queue to prevent XPC deadlocks
+            // 2. Initialize Virtual Machine
             let vm = VZVirtualMachine(configuration: vmConfig)
             self.virtualMachine = vm
             vm.delegate = self
@@ -205,11 +206,9 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         vmConfig.cpuCount = min(config.cpuCount, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
         vmConfig.memorySize = min(config.memorySizeMB * 1024 * 1024, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
 
-        // Storage Device Attachment
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: config.diskURL, readOnly: false)
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
 
-        // Network Device Attachment
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
         if let mac = VZMACAddress(string: config.macAddress) {
             networkDevice.macAddress = mac
@@ -217,14 +216,12 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
-        // Display Configuration
         let graphics = VZMacGraphicsDeviceConfiguration()
         graphics.displays = [
             VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 220)
         ]
         vmConfig.graphicsDevices = [graphics]
 
-        // Single USB Pointing Device avoids coordinate system contention
         vmConfig.keyboards = [VZUSBKeyboardConfiguration()]
         vmConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
 
