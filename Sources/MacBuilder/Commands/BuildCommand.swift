@@ -151,7 +151,7 @@ public enum VMRunner {
 
         vmConfig.bootLoader = VZMacOSBootLoader()
 
-        // Resource Allocation clamped within framework supported ranges
+        // Resource Allocation clamped within framework limits
         let requestedCPU = config.cpuCount
         let minCPU = VZVirtualMachineConfiguration.minimumAllowedCPUCount
         let maxCPU = VZVirtualMachineConfiguration.maximumAllowedCPUCount

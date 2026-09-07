@@ -84,10 +84,10 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             window.delegate = self
             self.window = window
 
-            // 4. Configure Virtual Machine View with explicit geometry before display attachment
+            // 4. Configure Virtual Machine View with valid AppKit autoresizing mask
             let vmView = VZVirtualMachineView(frame: NSRect(origin: .zero, size: windowSize))
             vmView.wantsLayer = true
-            vmView.autoresizingMask = [.widthSizable, .heightSizable]
+            vmView.autoresizingMask = [.width, .height]
             vmView.virtualMachine = vm
             vmView.capturesSystemKeys = true
             if #available(macOS 14.0, *) {
@@ -168,7 +168,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         vmConfig.bootLoader = VZMacOSBootLoader()
 
-        // 4. Resource Allocation clamped within framework supported ranges
+        // 4. Resource Allocation clamped within framework limits
         let requestedCPU = config.cpuCount
         let minCPU = VZVirtualMachineConfiguration.minimumAllowedCPUCount
         let maxCPU = VZVirtualMachineConfiguration.maximumAllowedCPUCount
