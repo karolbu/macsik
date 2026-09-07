@@ -97,7 +97,11 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
             window.contentView = vmView
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if #available(macOS 14.0, *) {
+                NSApp.activate()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+            }
 
             print("Starting hypervisor...")
             fflush(stdout)
@@ -164,11 +168,16 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         vmConfig.bootLoader = VZMacOSBootLoader()
 
-        // 4. Resource Allocation
-        let effectiveCPU = max(config.cpuCount, hardwareModel.minimumSupportedCPUCount)
-        let effectiveRAM = max(config.memorySizeMB * 1024 * 1024, hardwareModel.minimumSupportedMemorySize)
-        vmConfig.cpuCount = min(effectiveCPU, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
-        vmConfig.memorySize = min(effectiveRAM, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
+        // 4. Resource Allocation clamped within framework supported ranges
+        let requestedCPU = config.cpuCount
+        let minCPU = VZVirtualMachineConfiguration.minimumAllowedCPUCount
+        let maxCPU = VZVirtualMachineConfiguration.maximumAllowedCPUCount
+        vmConfig.cpuCount = min(max(requestedCPU, minCPU), maxCPU)
+
+        let requestedRAM = config.memorySizeMB * 1024 * 1024
+        let minRAM = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        let maxRAM = VZVirtualMachineConfiguration.maximumAllowedMemorySize
+        vmConfig.memorySize = min(max(requestedRAM, minRAM), maxRAM)
 
         // 5. Virtual Storage Devices
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: config.diskURL, readOnly: false)
@@ -176,9 +185,10 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         // 6. Network Devices
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        if let mac = VZMACAddress(string: config.macAddress) {
-            networkDevice.macAddress = mac
+        guard let mac = VZMACAddress(string: config.macAddress) else {
+            throw VMError.configurationInvalid("Invalid MAC address: \(config.macAddress)")
         }
+        networkDevice.macAddress = mac
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
         vmConfig.networkDevices = [networkDevice]
 
@@ -212,7 +222,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         if let vm = virtualMachine {
             if vm.canRequestStop {
                 try? vm.requestStop()
-            } else if vm.state == .running {
+            } else if vm.canStop {
                 vm.stop { _ in }
             }
         }
@@ -220,7 +230,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-        DispatchQueue.main.async {
+        Task { @MainActor in
             print("\nGuest OS shutdown detected. Closing GUI session.")
             fflush(stdout)
             self.terminateApp()
@@ -228,7 +238,7 @@ final class InjectAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     nonisolated func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
-        DispatchQueue.main.async {
+        Task { @MainActor in
             print("\n❌ Virtual Machine stopped unexpectedly with error: \(error.localizedDescription)")
             fflush(stdout)
             self.terminateApp()

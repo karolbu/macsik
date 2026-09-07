@@ -116,7 +116,7 @@ public enum VMRunner {
             }
         }
 
-        if vm.state != .stopped {
+        if vm.state != .stopped && vm.canStop {
             try? await vm.stop()
         }
 
@@ -151,10 +151,16 @@ public enum VMRunner {
 
         vmConfig.bootLoader = VZMacOSBootLoader()
 
-        let effectiveCPU = max(config.cpuCount, hardwareModel.minimumSupportedCPUCount)
-        let effectiveRAM = max(config.memorySizeMB * 1024 * 1024, hardwareModel.minimumSupportedMemorySize)
-        vmConfig.cpuCount = min(effectiveCPU, VZVirtualMachineConfiguration.maximumAllowedCPUCount)
-        vmConfig.memorySize = min(effectiveRAM, VZVirtualMachineConfiguration.maximumAllowedMemorySize)
+        // Resource Allocation clamped within framework supported ranges
+        let requestedCPU = config.cpuCount
+        let minCPU = VZVirtualMachineConfiguration.minimumAllowedCPUCount
+        let maxCPU = VZVirtualMachineConfiguration.maximumAllowedCPUCount
+        vmConfig.cpuCount = min(max(requestedCPU, minCPU), maxCPU)
+
+        let requestedRAM = config.memorySizeMB * 1024 * 1024
+        let minRAM = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        let maxRAM = VZVirtualMachineConfiguration.maximumAllowedMemorySize
+        vmConfig.memorySize = min(max(requestedRAM, minRAM), maxRAM)
 
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: config.diskURL, readOnly: false)
         vmConfig.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
